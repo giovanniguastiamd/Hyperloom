@@ -129,6 +129,9 @@ SERVER_BOOT_TIMEOUT_REASON = "server_boot_timeout"
 HOST_GPUS_UNAVAILABLE_REASON = "host_gpus_unavailable"
 #: The server went quiet while serving (``FailedStep.SERVER_STALLED``): a hang or a slow candidate end alike.
 SERVER_STALLED_REASON = "server_stalled"
+#: The serving interpreter could not report its framework (``FailedStep.FRAMEWORK_VERSION_UNKNOWN``) in a test that
+#: changed nothing of the framework: the image or the sandbox's environment cannot serve it, whatever the candidate.
+FRAMEWORK_UNIMPORTABLE_REASON = "framework_unimportable"
 #: The steps inference_suite names a round failed at that are not about the candidate, or that name the cause better
 #: than any line of a log that holds only the symptom. Every other step leaves the verdict to the logs.
 _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
@@ -236,7 +239,9 @@ class FailureEvidence:
     failed on its own says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
     return code alone does not say; ``step_failure`` is the step the failed round's ``report.json`` names, with its
     detail, which inference_suite records in place of the return code it exits with; ``unrun`` is ``<error_class>:
-    <message>`` of a failed round refused before it ran, which left no log: the only account of it there is.
+    <message>`` of a failed round refused before it ran, which left no log: the only account of it there is;
+    ``framework_changed`` is whether the test put a rebuilt framework on its server's import path
+    (:attr:`~hyperloom.measure.socket.TestCall.framework_changed`).
     """
 
     logs: tuple[str, ...] = ()
@@ -244,6 +249,7 @@ class FailureEvidence:
     detail: str = ""
     step_failure: StepFailure | None = None
     unrun: str = ""
+    framework_changed: bool = False
 
 
 def classify_test_failure(
@@ -274,8 +280,9 @@ def classify_test_failure(
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
     reported = evidence.step_failure
     step = reported.step if reported else None
-    if reported and step in _FAILED_STEP_VERDICTS:
-        return _from_step(reported)
+    by_step = _from_step(reported, evidence.framework_changed) if reported else None
+    if by_step is not None:
+        return by_step
     named = _named_by_logs(text)
     if named is not None:
         return named
@@ -306,11 +313,25 @@ def _from_error_class(error_class: str) -> FailureClassification:
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")
 
 
-def _from_step(reported: StepFailure) -> FailureClassification:
+def _from_step(reported: StepFailure, framework_changed: bool) -> FailureClassification | None:
+    """The verdict the step a round failed at gives by itself; ``None`` leaves it to the logs."""
+    if reported.step is FailedStep.FRAMEWORK_VERSION_UNKNOWN:
+        return _framework_unimportable(reported.detail, framework_changed)
+    if reported.step not in _FAILED_STEP_VERDICTS:
+        return None
     failure_class, reason = _FAILED_STEP_VERDICTS[reported.step]
     if reported.step in _DETAILED_STEPS and reported.detail.strip():
         reason = f"{reason}: {log_causes.one_line(reported.detail)}"
     return FailureClassification(Disposition.FAILED, failure_class, reason)
+
+
+def _framework_unimportable(detail: str, changed: bool) -> FailureClassification:
+    """The serving interpreter could not import or report its framework: the rebuilt framework broke the import when the
+    test laid one, else the image's own install is what cannot be imported."""
+    line = log_causes.one_line(detail)
+    reason = IMPORT_ERROR if changed else FRAMEWORK_UNIMPORTABLE_REASON
+    reason = f"{reason}: {line}" if line else reason
+    return _candidate(reason) if changed else _infra(reason)
 
 
 def _named_by_logs(text: str) -> FailureClassification | None:

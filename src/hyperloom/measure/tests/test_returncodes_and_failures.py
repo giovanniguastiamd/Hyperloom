@@ -383,6 +383,29 @@ def test_a_flag_the_suite_refused_before_boot_is_a_candidate_serve_flag_quoting_
     assert decides_test(verdict)
 
 
+@pytest.mark.parametrize(
+    ("framework_changed", "failure_class", "reason", "decides"),
+    [
+        (False, FailureClass.INFRA, "framework_unimportable", False),
+        (True, FailureClass.CANDIDATE, failure_signature.IMPORT_ERROR, True),
+    ],
+)
+def test_an_interpreter_that_cannot_import_its_framework_is_the_image_unless_the_test_changed_the_framework(
+    framework_changed, failure_class, reason, decides
+) -> None:
+    detail = "/opt/venv/bin/python cannot import sglang"
+    verdict = classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(
+            logs=(TRACEBACK_LOG,),
+            step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail),
+            framework_changed=framework_changed,
+        ),
+    )
+    assert (verdict.failure_class, verdict.failure_reason) == (failure_class, f"{reason}: {detail}")
+    assert decides_test(verdict) is decides
+
+
 def test_a_flag_refusal_without_a_detail_is_still_a_candidate_serve_flag() -> None:
     verdict = classify_test_failure(
         returncode=1, evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FLAG_UNKNOWN))
